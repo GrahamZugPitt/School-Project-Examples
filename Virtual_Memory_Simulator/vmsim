@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+
+import sys, getopt
+import math
+#import numpy as np
+#import matplotlib.pyplot as plt
+PROCESS_COUNT = 2
+
+class Node:
+    def __init__(self, loc):
+        self.next_use = loc
+        self.next = None
+class Page_Entry:
+    def __init__(self, pos):
+        self.present = [-1, -1] #-1 means no process at all
+        self.dirty = [None, None]
+        self.next = [None, None]
+        self.prev = [None, None]
+        self.node = [None, None]
+        self.tails = [None,None]
+        self.pos = pos
+class Proc_Mem_Block:
+    def __init__(self, size, proc_num):
+        self.count = 0
+        self.size = int(size)
+        self.head = None
+        self.tail = None
+        self.proc = proc_num
+        self.empty = True
+
+def finishing_print_statement(algorithm, frames, size, memory_accesses, page_faults, writes_to_disk):
+    print("Algorithm: " + algorithm.upper())
+    print("Number of frames: " + frames)
+    print("Page size: " + size + " KB")
+    print("Total memory accesses: " + memory_accesses)
+    print("Total page faults: " + page_faults)
+    print("Total writes to disk: " + writes_to_disk)
+
+#This functions removes a given page from its linked list
+def remove_from_list(page, block, table):
+    block.count = block.count - 1
+    #Removing from the middle
+    if(page.prev[block.proc] != None and page.next[block.proc] != None):
+        table[page.next[block.proc]].prev[block.proc] = page.prev[block.proc]
+        table[page.prev[block.proc]].next[block.proc] = page.next[block.proc]
+        page.next[block.proc] = None
+        page.prev[block.proc] = None
+    #Removing from the back
+    elif(page.next[block.proc] == None and page.prev[block.proc] != None):
+        block.tail = page.prev[block.proc] #moves tail forward
+        table[block.tail].next[block.proc] = None
+        page.prev[block.proc] = None
+        page.next[block.proc] = None
+    #Removing from the front
+    elif(page.prev[block.proc] == None and page.next[block.proc] !=None):
+        block.head = page.next[block.proc]
+        table[block.head].prev[block.proc] = None
+        page.next[block.proc] = None
+        page.prev[block.proc] = None
+    #Removing a singleton element
+    elif(page.prev[block.proc] == None and page.next[block.proc] == None):
+        block.head = None
+        block.tail = None
+        block.empty = True
+    return 
+#Initializes a page by marking it as contained within a process' linked list and marks it as dirty. 
+#This function runs even if a page is already in the list in question, as it may need to be marked as dirty
+def initialize_page(page, proc, load_type):
+    page.present[proc] = 1
+    if(load_type == 's'):
+        page.dirty[proc] = True
+#Marks a node as having been removed (and not placed back in) a linked list
+def reset_node(page, proc):
+    page.present[proc] = -1
+    page.dirty[proc] = False
+
+#Adds an element to the head of a given linked list in LRU mode
+#If the list becomes to large, this function will throw out the tail
+#Of the linked list, which will implicitly be the node referenced 
+#the furthest back.
+def add_to_front(addr, block, table):
+    block.count = block.count + 1
+    if block.empty == True:
+        block.empty = False
+        block.head = addr
+        block.tail = addr
+        return
+    table[addr].next[block.proc] = block.head
+    table[block.head].prev[block.proc] = addr
+    block.head = addr
+    if(block.count > block.size):
+        page_being_dropped = table[block.tail]
+        remove_from_list(page_being_dropped, block, table)
+        reset_node(page_being_dropped, block.proc)
+    return
+
+#The job of this function is to find the next use of a given page entry
+#It is called by find_victim
+def get_next_use(index, page, block):
+    while page.node[block.proc].next_use < index:
+        page.node[block.proc] = page.node[block.proc].next
+        #If None is returned, that means the page in question
+        #is never referenced again
+        if page.node[block.proc] == None:
+            return None
+    return page.node[block.proc].next_use
+
+#The job of this function is to find the optimal victim in OPT mode
+#It is called by add_to_front_optim
+def find_victim(index, block, table):
+    page = table[block.tail]
+    victim = None
+    vic_number = -1
+    while True:
+        potential_vic_number = get_next_use(index, page, block)
+        #If we find a page that isn't referenced, we can simply throw it out
+        #this breaks ties correctly because we are traversing the linked list
+        #from the tail up, so the first node we find that isn't referenced in
+        #the future is also the node that was referenced the furthest in the
+        #past
+        if potential_vic_number == None:
+            return page
+        elif potential_vic_number > vic_number:
+            victim = page
+            vic_number = potential_vic_number
+        if page.prev[block.proc] == None:
+            break
+        page = table[page.prev[block.proc]]
+    return victim
+
+
+#Add a node to the head of a linked list in OPT mode. 
+#The only difference between this function and add_to_front
+#is that this function chooses pages to remove from the list
+#differently, and also detects whether the removed page
+#was dirty (checking if the page is dirty in LRU mode
+#is done in the LRU function
+def add_to_front_optim(addr, block, table, index):
+    was_dirty = False
+    block.count = block.count + 1
+    if block.empty == True:
+        block.empty = False
+        block.head = addr
+        block.tail = addr
+        return was_dirty
+    if(block.count > block.size):
+        page_being_dropped = find_victim(index, block, table)
+        if page_being_dropped.dirty[block.proc]:
+            was_dirty = True
+        remove_from_list(page_being_dropped, block, table)
+        reset_node(page_being_dropped, block.proc)
+    table[addr].next[block.proc] = block.head
+    table[block.head].prev[block.proc] = addr
+    block.head = addr
+    return was_dirty
+
+#The optimal replacement function
+def optim(algorithm, numframes, pagesize, memorysplit, tracefile): 
+    #Setting up parameters
+    memory_accesses = 0
+    page_faults = 0
+    writes_to_disk = 0
+    page_bytes = (10 + int(math.log(pagesize, 2)))
+    table = []
+    for i in range (0, int(2**32/2**page_bytes)):
+        table.append(Page_Entry(i))
+    process_mem_blocks = []
+    for i in range(0, PROCESS_COUNT):
+        process_mem_blocks.append(Proc_Mem_Block(numframes * memorysplit[i] /(memorysplit[0] + memorysplit[1]), i))
+    tracefile = open(str(tracefile),"r")
+    i = 0
+    #The first pass over the file, used to determine which nodes will
+    #be referenced the furthest in the future
+    for l in tracefile:
+        memory_accesses = memory_accesses + 1
+        row = l.split()
+        access_type = row[0]
+        address = int(row[1], base = 16) 
+        proc_num = int(row[2])
+        address = address >> page_bytes
+        proc_block =  process_mem_blocks[proc_num]
+        node = table[address].node[proc_num]
+        head = node
+        #Each memory address has a linked list associated with it
+        #that stores every time it is referenced, that linked list
+        #is constructed here
+        if node == None:
+            table[address].node[proc_num] = Node(i)
+            table[address].tails[proc_num] = table[address].node[proc_num]
+        else:
+            table[address].tails[proc_num].next = Node(i)  
+            table[address].tails[proc_num] = table[address].tails[proc_num].next
+        i += 1
+    tracefile.seek(0)
+    i = 0
+    #The second pass over the file,. where the optimal algorithm is simulated
+    for l in tracefile:
+        row = l.split()
+        access_type = row[0]
+        address = int(row[1], base = 16) 
+        proc_num = int(row[2])
+        address = address >> page_bytes
+        proc_block =  process_mem_blocks[proc_num]
+        page_entry = table[address]
+        #If a page is not in the linked list, we add it. Removal is done in add_to_front_optim if the list is too large
+        if page_entry.present[proc_num] == -1:
+            initialize_page(page_entry, proc_num, access_type)
+            page_faults += 1
+            if add_to_front_optim(address, proc_block, table, i):
+                writes_to_disk += 1
+        #Otherwise, we move it to the front
+        else:
+            initialize_page(page_entry, proc_num, access_type)
+            remove_from_list(page_entry, proc_block, table)
+            add_to_front_optim(address, proc_block, table, i)
+        i += 1
+    tracefile.close()
+    finishing_print_statement(algorithm, str(numframes), str(pagesize), str(memory_accesses), str(page_faults), str(writes_to_disk))
+    return page_faults
+
+#The LRU function
+def lru(algorithm, numframes, pagesize, memorysplit, tracefile): 
+    #Setting up parameters
+    memory_accesses = 0
+    page_faults = 0
+    writes_to_disk = 0
+    page_bytes = (10 + int(math.log(pagesize, 2)))
+    table = []
+    for i in range (0, int(2**32/2**page_bytes)):
+        table.append(Page_Entry(i))
+    process_mem_blocks = []
+    for i in range(0, PROCESS_COUNT):
+        process_mem_blocks.append(Proc_Mem_Block(numframes * memorysplit[i] /(memorysplit[0] + memorysplit[1]), i))
+    tracefile = open(str(tracefile),"r")
+    #Beginning the single pass over the file, LRU requires only one pass
+    for l in tracefile:
+        memory_accesses = memory_accesses + 1
+        row = l.split()
+        access_type = row[0]
+        address = int(row[1], base = 16) 
+        proc_num = int(row[2])
+        address = address >> page_bytes
+        proc_block =  process_mem_blocks[proc_num]
+        page_entry = table[address]
+        #If the page is not in the linked list assocated with the given process, add it
+        #Removal is done in the add_to_front function
+        if page_entry.present[proc_num] == -1:
+            initialize_page(page_entry, proc_num, access_type)
+            if not proc_block.empty and table[proc_block.tail].dirty[proc_num] and proc_block.count == proc_block.size:
+                writes_to_disk += 1
+            page_faults += 1
+            add_to_front(address, proc_block, table)
+        #If the page is in the associated linked list, move it to the head
+        else:
+            initialize_page(page_entry, proc_num, access_type)
+            remove_from_list(page_entry, proc_block, table)
+            add_to_front(address, proc_block, table)
+
+    tracefile.close()
+    finishing_print_statement(algorithm, str(numframes), str(pagesize), str(memory_accesses), str(page_faults), str(writes_to_disk))
+    return page_faults
+#The program begins here
+def main():
+    algorithm = ''
+    numframes = ''
+    pagesize = ''
+    memorysplit = ''
+    tracefile = ''
+    argv = sys.argv[1:]
+    #This parses all of the inputs. The flags can be entered in arbitrary order, but the file must come last
+    try:
+        opts, args = getopt.getopt(argv, "a:n:p:s:")
+        for opt, arg in opts:
+            if opt in ['-a']:
+                algorithm = arg
+            elif opt in ['-n']:
+                numframes = arg
+            elif opt in ['-p']:
+                pagesize = arg
+            elif opt in ['-s']:
+                memorysplit = arg
+        tracefile = argv[len(argv) - 1]
+        if algorithm != "opt" and algorithm != "lru":
+            raise Exception
+        numframes = int(numframes)
+        pagesize = int(pagesize)
+        memorysplit = memorysplit.split(":")
+        memorysplit[0] = int(memorysplit[0])
+        memorysplit[1] = int(memorysplit[1])
+        if len(memorysplit) != 2:
+            raise Exception
+        if numframes % (memorysplit[0] + memorysplit[1]) != 0:
+            raise Exception
+    #An exception is thrown is the memorysplit ratio doesn't work, or if any of the arguments are improper
+    except:
+        print("\nInvalid arguments. Use the following format: \n./vmsim -a <opt|lru> –n <numframes> -p <pagesize in KB> -s <memory split> <tracefile> \n")
+        exit(1)   
+    if(algorithm == "lru"):
+        lru(algorithm, numframes, pagesize, memorysplit, tracefile)
+    else:
+        optim(algorithm, numframes, pagesize, memorysplit, tracefile)
+#This was the code that I used to create the write up. I'm keeing it because I think its cute. 
+# def grapher():
+#     algorithm = ''
+#     numframes = ''
+#     pagesize = ''
+#     memorysplit = ''
+#     tracefile = ''
+#     argv = sys.argv[1:]
+#     try:
+#         opts, args = getopt.getopt(argv, "a:n:p:s:")
+#         for opt, arg in opts:
+#             if opt in ['-a']:
+#                 algorithm = arg
+#             elif opt in ['-n']:
+#                 numframes = arg
+#             elif opt in ['-p']:
+#                 pagesize = arg
+#             elif opt in ['-s']:
+#                 memorysplit = arg
+#         tracefile = argv[len(argv) - 1]
+#         if algorithm != "opt" and algorithm != "lru":
+#             raise Exception
+#         numframes = int(numframes)
+#         pagesize = int(pagesize)
+#         memorysplit = memorysplit.split(":")
+#         memorysplit[0] = int(memorysplit[0])
+#         memorysplit[1] = int(memorysplit[1])
+#         if len(memorysplit) != 2:
+#             raise Exception
+#         if numframes % (memorysplit[0] + memorysplit[1]) != 0:
+#             raise Exception
+#     except:
+#         print("\nInvalid arguments. Use the following format: \n./vmsim -a <opt|lru> –n <numframes> -p <pagesize in KB> -s <memory split> <tracefile> \n")
+#         exit(1)   
+#     splits = ["1:1", "1:3", "3:1", "3:5", "5:3", "7:9", "9:7"]
+#     lru_data = []
+#     opt_data = []
+#     i = 0
+#     for s in splits:
+#         memorysplit = splits[i].split(":")
+#         i += 1
+#         memorysplit[0] = int(memorysplit[0])
+#         memorysplit[1] = int(memorysplit[1])
+#         lru_data.append(lru("LRU", numframes, pagesize, memorysplit, tracefile))
+#         opt_data.append(optim("OPT", numframes, pagesize, memorysplit, tracefile))
+#     ypos = np.arange(7)
+#     plt.xticks(ypos, splits)
+#     plt.bar(ypos - .2, lru_data, width = .4, label = "LRU")
+#     plt.bar(ypos + .2, opt_data, width = .4, label = "OPT")
+#     plt.xlabel("Memory Split")
+#     plt.ylabel("Page Faults")
+#     plt.legend()
+#     plt.savefig('graph3.png')
+
+
+main()
+#grapher()

@@ -1,0 +1,649 @@
+---
+title: "CS 1675 Final Project"
+subtitle: "Example: save and reload a model object"
+author: "Graham Zug"
+output: html_document
+---
+
+```{r setup, include=FALSE, eval=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Part 0: Setting The Workspace Up
+
+This part is just loading in packages and data, as well as splitting the data up logically (e.g. dividing the response 1 from the response 2 inputs).
+## Load packages
+
+```{r, load_packages, eval=TRUE}
+library(caret)
+library(tidyverse)
+library(rstanarm)
+library(dotwhisker)
+library(broom.mixed)
+library(dplyr)
+library(ggplot2)
+library(e1071)
+library(neuralnet)
+library(plotROC)
+```
+
+## Final project data
+
+```{r, read_glimpse_data, eval=TRUE}
+data_url <- 'https://raw.githubusercontent.com/jyurko/CS_1675_Fall_2020/master/HW/final_project/cs_1675_final_project_data.csv'
+
+df <- readr::read_csv(data_url, col_names = TRUE)
+```
+
+Separate the variables associated with Step 1.  
+
+```{r, make_step_1_data, eval=TRUE}
+step_1_df <- df %>% select(xA, xB, x01:x06, response_1)
+```
+
+Separate the variables associated with the Option B classification formulation. Notice that the `outcome_2` variable is converted to a factor with a specific ordering of the levels. Use this ordering when modeling in `caret` to make sure everyone predicts the `Fail` class as the "positive" class in the confusion matrix.  
+
+```{r, make_step_2_option_b_data, eval=TRUE}
+step_2_b_df <- df %>% select(xA, xB, response_1, x07:x11, outcome_2) %>% 
+  mutate(outcome_2 = factor(outcome_2, levels = c("Fail", "Pass")))
+```
+
+Separate the variables associated with the Option A classification formulation. The `outcome_2` variable is again converted to a factor with a specific ordering of the levels.  
+
+```{r, make_step_2_option_a_data, eval=TRUE}
+step_2_a_df <- df %>% select(xA, xB, x01:x11, outcome_2) %>% 
+  mutate(outcome_2 = factor(outcome_2, levels = c("Fail", "Pass")))
+```
+
+
+##Part 1: Visualizing the Data
+
+The very first thing I'd like to do is call glimpse(), just to get an idea of the kinds of variables I'm working with:
+
+```{r, check_glimpse, eval=TRUE}
+df %>% glimpse()
+```
+
+The mean and median of every continuous variable is nearly identical, it seems to be that each of these inputs is going to have some sort of center where most of their data points populate, but it will helpful to see actual visualizations to confirm this. 
+
+The next thing I'm going to do is get some counts from the discrete data points. The only sets that seem discrete are xA, xB, and outcome_2. outcome_2 is what we are trying to predict, so it'd be nice to see how often we'd expect to get a pass at random:
+
+```{r, counts_1, eval=TRUE}
+count(df, vars = outcome_2)
+```
+
+Huh! so outcome_2 is very balanced, we are only getting a pass about 51.1% of the time. This is going to be helpful to note going forward as it informs us a bit about what a "good" model looks like. Succeeding more than 48.9% of the time at detecting failure is an improvement over chance. Now lets see the relationship between outcome_2 and the other discrete variables:
+
+```{r, counts_2, eval=TRUE}
+count(df, vars = xA)
+count(df, vars = xB)
+prop.table(table(df %>% select(xA,outcome_2)), 1)
+prop.table(table(df %>% select(xB,outcome_2)), 1)
+```
+
+Some things stand out here. The first thing to note is that we have a fairly evenly distributed amount of each variable (there is no variable that is occurring that much more than any other, and we have a sample size of at least hundreds for all variables). The other thing to note is that our choice of xA does not seems to have a significant effect on the overall outcome, but our choice of xB does seem to have a significant effect. B2, for example, passes 61% of the time, whereas B4 fails almost 63% of the time, we will need to analyze the relationship between the choices of inputs associated with these variables, but we can say that if, for example, our model says that B4 maximizes our chances of passing better than B2, we will be surprised. 
+
+## Relationship between response_1 and outcome_2
+
+Branching out further into other variables, let us investiage the relationship between response_1 and outcome_2. This will help us try to get an idea for what we are looking for when manipulating response_1. Are we trying to minimize it, or maximize it? Does it look like it has a linear relationship with outcome_2? etc. 
+
+```{r, response_1 and outcome_2, eval=TRUE}
+df %>% ggplot(aes(response_1,outcome_2)) + geom_jitter()
+```
+
+It appears from this visualization that passing is associated with response_1 being closer to 0.
+
+```{r, relationship_with_other_variables, eval=TRUE}
+response_1_partitioned <- ifelse(abs(df$response_1) < 1, 1, 0)
+response_1_partitioned <- as.data.frame(response_1_partitioned) %>% mutate("3" = ifelse(abs(df$response_1) < 3, 1, 0))
+response_1_partitioned <- response_1_partitioned %>% mutate("5" = ifelse(abs(df$response_1) < 5, 1, 0))
+response_1_partitioned <- response_1_partitioned %>% mutate("10" = ifelse(abs(df$response_1) < 10, 1, 0))
+response_1_partitioned <- response_1_partitioned %>% mutate("20" = ifelse(abs(df$response_1) < 20, 1, 0))
+response_1_partitioned <- as.data.frame(response_1_partitioned) %>% mutate(outcome = df$outcome_2)
+prop.table(table(response_1_partitioned %>% select(response_1_partitioned,outcome)), 1)
+prop.table(table(response_1_partitioned %>% select("3",outcome)), 1)
+prop.table(table(response_1_partitioned %>% select("5",outcome)), 1)
+prop.table(table(response_1_partitioned %>% select("10",outcome)), 1)
+prop.table(table(response_1_partitioned %>% select("20",outcome)), 1)
+
+```
+
+As one can see from the above probability tables, the rate of failure increases as the absolute value of response1 gets greater and greater.
+
+## Relationship between response_1 and outcome_2 with other variables
+
+We will now explore the relationship between outputs 1-6 and responses 1, as well as the relationship between xA and xB with response 1.
+
+```{r, dotplots, eval=TRUE}
+df %>% ggplot(aes(x01,response_1)) + geom_point()
+df %>% ggplot(aes(x02,response_1)) + geom_point()
+df %>% ggplot(aes(x03,response_1)) + geom_point()
+df %>% ggplot(aes(x04,response_1)) + geom_point()
+df %>% ggplot(aes(x05,response_1)) + geom_point()
+df %>% ggplot(aes(x06,response_1)) + geom_point()
+df %>% ggplot(aes(xA,response_1)) + geom_jitter()
+df %>% ggplot(aes(xB,response_1)) + geom_jitter()
+df %>% ggplot(aes(x01,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x02,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x03,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x04,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x05,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x06,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x07,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x08,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x09,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x10,outcome_2)) + geom_jitter()
+df %>% ggplot(aes(x11,outcome_2)) + geom_jitter()
+
+```
+This visualization has demonstrated some things. The first is that some variables seem to be more strongly related with the outcome of response 1 than others. 1 and 2 in particular seem to have some sort of positive and negative relationship, respectively, whereas it is hard to see any trend among response_1 with variables 3 and 4. We also see that xA, which seemed above to have very little effect on the outcome, also seem to have little effect on response 1 (though A1 does seem more spread out, which may be important). xB on the other hand tells a different story. B2, which seemed to have the strongest performance above, seems to have results in which response1 is near zero, which makes sense given what we have seen from response1. Furthermore, B4, which had a very high failure rate, seems to have a wide spread of response1 results. 
+
+There are some patterns with outcome 2 between the continuous variables that pop out looking at these dotplots as well. For some variables, it is hard to see a trend from this visualization, but in those for which some trend is visually present, passing does not seem to be a linear relationship with any of the inputs, but rather, seems to occur in a cluster around some chosen value and drop off for other values. For example, values around 160 for x03 seems to be correlated with passing and values around 143 seem to result in more passes for x07.
+
+
+
+```{r,relationship_between_inputs, eval=TRUE}
+df %>% select(x01,x02,x03,x04,x05,x06,x07,x08,x09,x10,x11) %>% cor() %>% corrplot::corrplot(method = "square")
+```
+
+
+The inputs themselves, on the whole, do not seem to be correlated at all! There is some relationship between x09 and other variables and the variables x01-x03, but on the whole, there does not seem to be much of a relationship. Something that is interesting, despite the fact that these relationships are not strong, is that almost none of the variables seems to be negatively correlated with each other, they all have very slight positive or neutral correlations. 
+
+
+```{r,histograms, eval=TRUE}
+
+df %>% ggplot(mapping = aes(x = x01)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x02)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x03)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x04)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x05)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x06)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x07)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x08)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x09)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x10)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+df %>% ggplot(mapping = aes(x = x11)) + geom_histogram(bins = 50, color = "navyblue", fill = "gold", size = 1.55)
+
+```
+
+Every single continuous variables seems to be normally distributed! They may have a different center or a larger or smaller spread, but all of these seem like bell curves to me. 
+
+##Part 2A: Regression Models
+
+Let's fit some linear regression models! In order to choose the best model, we will compare the models based on their adjusted R-squared values:
+
+This is a function that normalizes inputs, it is essetially just a pre-processing step. There is an implicit assumption here that the continuous variables are normal, this assumption is confirmed by our visualizations of the continuous variables above. 
+
+```{r, normalizer, eval=TRUE}
+normalizer <- function(vector){
+    
+      vector <- (vector - mean(vector))/sd(vector)
+      return (vector)
+}
+normal1 <- normalizer(step_1_df$x01)
+normal2 <- normalizer(step_1_df$x02)
+normal3 <- normalizer(step_1_df$x03)
+normal4 <- normalizer(step_1_df$x04)
+normal5 <- normalizer(step_1_df$x05)
+normal6 <- normalizer(step_1_df$x06)
+normal_step_1_df <- data.frame(normal1,normal2,normal3,normal4,normal5,normal6,df$xA,df$xB, df$response_1)
+```
+
+We will use a linear model in terms of the discrete variables, a linear model in terms of the continous variables, a linear model that consists of both, and a basis function. The basis function will add a x01^3, x01^2, and x03^2 term to the model that uses both discrete and continuous values. This decision was made because, from the original data visualization, it seems not unlikely that x01 has a cubic relationship with response_1, and x03 has a quadratic relationship with response_1.
+
+```{r, lm_models, eval=TRUE}
+mod_discrete_lm <- lm(df.response_1 ~ df.xA + df.xB, normal_step_1_df)
+mod_continuous_lm <- lm(df.response_1 ~ normal1 + normal2 + normal3 + normal4 + normal5 + normal6, normal_step_1_df)
+mod_step_1_lm <- lm(df.response_1 ~ normal1 + normal2 + normal3 + normal4 + normal5 + normal6 + df.xA + df.xB, normal_step_1_df)
+mod_step_1_basis_lm <- lm(df.response_1 ~ normal1 + normal2 + normal3 + normal4 + normal5 + normal6 + df.xA + df.xB + I(normal1^2) + I(normal1^3) + I(normal3^2), normal_step_1_df)
+summary(mod_discrete_lm)
+summary(mod_continuous_lm)
+summary(mod_step_1_lm)
+summary(mod_step_1_basis_lm)
+```
+
+There is lots to love about all of the results in these models. The median is close to zero, Q1 and Q3 are about equally apart from the median, and the min and max values are almost equally apart in all three models (it is nice to work with normal data)! There is also much to learn from these models. The first thing that stuck out to me was that the model that only uses discrete variables performs better in every relevant metric (Rsquared, adjusted Rsquared, Redidual standard error). The models that incorporate both perform better than these (which is not surprising, they are acting with more degrees of freedom on more information). However, the fact that the models that incorporate both the continuous variables the discrete variables so significantly outperforms the models with either one individually tells us that both the continuous and discrete variables play a large roll in determining response_1, at least in part. 
+
+The best model appears to be the model with the custom basis. This model has the highest R^2 (as it should, because it uses the most arguments), but also has the highest adjusted R-squared values which penalizes the use of irrelevant terms. Based on the adjusted R-squared value, I would say the custom basis is currently the best model we have, we should check a coefficient plot to see how the coefficients of our best model compare with other models:
+
+```{r, coefficents_of_lm, eval=TRUE}
+coefplot::multiplot(mod_step_1_basis_lm, mod_step_1_lm)
+coefplot::multiplot(mod_step_1_basis_lm, mod_discrete_lm)
+```
+
+I elected to compare the coefficients not only of the best and second best, but also of the best and the 3rd best (my chosen basis was similar enough to the third linear model that I felt it might not be the most enlightening comparison). However, in both cases, nothing worrying happens with the basis model. The basis model is roughly as certain about its coefficients as the model that considers both the discrete and linear models, I would go so far as to say that the basis model is strictly superior. The basis model is less certain about its inputs than the discrete model, but not so significantly that I would change back to the discrete model. The basis model still seems best. 
+
+```{r, stan_lm_models, eval=TRUE}
+mod_step_1_lm_post <- stan_lm(df.response_1 ~ normal1 + normal2 + normal3 + normal4 + normal5 + normal6 + df.xA + df.xB, prior = R2(location = .5), data = normal_step_1_df, seed = 1245)
+mod_step_1_basis_post <- stan_lm(df.response_1 ~ normal1 + normal2 + normal3 + normal4 + normal5 + normal6 + df.xA + df.xB + I(normal1^2) + I(normal1^3) + I(normal3^2), prior = R2(location = .5),  data = normal_step_1_df, seed = 1245)
+```
+
+```{r, summary_01, eval=TRUE}
+summary(mod_step_1_lm_post)
+summary(mod_step_1_basis_post)
+```
+
+Using R^2 as our decisive parameter, the basis model is still best. Here is a visualization of the posterior coefficients where normal$n$ represents x0$n$. 
+
+```{r, coefficients_02, eval=TRUE}
+dwplot(mod_step_1_basis_post)
+```
+
+The spread on the posterior of sigma seems to be small relative to the absolute size of the MLE of sigma.
+
+
+##Part 2C: Regression Models
+
+```{r, controls, eval=TRUE}
+my_ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 10)
+
+my_ctrl_2 <- trainControl(method = "repeatedcv", 
+                             number = 5,
+                             repeats = 10,
+                             summaryFunction = twoClassSummary,                          
+                             classProbs = TRUE,
+                             savePredictions = TRUE)
+```
+
+Time to fit some regression models to predict response1! In addition to the required models, I will be training a lm function based on the basis function in the previous example:
+
+```{r, lm_models_01, eval=TRUE}
+metric_1 = "RMSE"
+lm_mod_step_1 <- train(response_1 ~ ., method = "lm", metric = metric_1, preProcess = c("center","scale"), trControl = my_ctrl, data = step_1_df)
+lm_mod_step_1_basis <- train(response_1 ~ x01 + + I(x01^2) + I(x01^3) + x02 + I(x03) + I(x03^2) + x04 + x05 + x06 + xA + xB, method = "lm", preProcess = c("center","scale"), metric = metric_1, trControl = my_ctrl, data = step_1_df)
+```
+
+```{r, lm_models_01_summary, eval=TRUE}
+summary(lm_mod_step_1)
+summary(lm_mod_step_1_basis)
+```
+
+```{r, glm_models_01, eval=TRUE}
+glm_mod_step_1 <- train(response_1 ~ ., data = step_1_df,
+                        method = "glm",
+                        preProcess = c("center","scale"),
+                        metric = metric_1,
+                        trControl = my_ctrl)
+glm_mod_step_1
+```
+
+
+```{r, glmnet_models_01, eval=TRUE}
+glmnet_mod_step_1 <- train(response_1 ~ . + .*. + .*.*., data = step_1_df,
+                        method = "glmnet",
+                        preProcess = c("center","scale"),
+                        metric = metric_1,
+                        trControl = my_ctrl)
+glmnet_mod_step_1
+```
+
+There are 60 variables, as intended. 
+
+```{r, neural_network_01, eval=TRUE}
+nnet_mod_step_1 <- train(response_1 ~ x01 + x02 + x03 + x04 + x05 + x06 + xA + xB, #Rstudio didn't like the original data frame for some reason
+                        data = df,
+                        method = "nnet",
+                        metric = metric_1,
+                        hidden = 8,
+                        linear.output = TRUE,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl,
+                        trace = FALSE)
+
+nnet_mod_step_1
+```
+
+```{r, forest, eval=TRUE}
+forest_mod_step_1 <- train(response_1 ~ x01 + x02 + x03 + x04 + x05 + x06 + xA + xB, 
+                        data = df,
+                        method = "rf",
+                        metric = metric_1,
+                        linear.output = TRUE,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl,
+                        importance = TRUE)
+
+forest_mod_step_1
+```
+
+```{r, gradient_boosted_tree_00, include = FALSE, eval=TRUE}
+grad_tree_mod_step_1 <- train(response_1 ~ x01 + x02 + x03 + x04 + x05 + x06 + xA + xB, 
+                        data = df,
+                        method = "xgbTree",
+                        metric = metric_1,
+                        linear.output = TRUE,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl,
+                        importance = TRUE)
+```
+
+```{r, gradient_boosted_tree_01, eval = FALSE}
+grad_tree_mod_step_1 <- train(response_1 ~ x01 + x02 + x03 + x04 + x05 + x06 + xA + xB, 
+                        data = df,
+                        method = "xgbTree",
+                        metric = metric_1,
+                        linear.output = TRUE,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl,
+                        importance = TRUE)
+```
+
+```{r,special_block, eval=TRUE}
+grad_tree_mod_step_1
+```
+
+```{r, k_nearest_neighbors, eval=TRUE}
+knn_mod_step_1 <- train(response_1 ~ x01 + x02 + x03 + x04 + x05 + x06 + xA + xB, 
+                        data = df,
+                        method = "knn",
+                        metric = metric_1,
+                        linear.output = TRUE,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl)
+
+knn_mod_step_1
+```
+
+```{r, partial_least_squares, eval=TRUE}
+partial_least_squares <- train(response_1 ~ x01 + x02 + x03 + x04 + x05 + x06 + xA + xB, 
+                        data = df,
+                        method = "pls",
+                        metric = metric_1,
+                        linear.output = TRUE,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl)
+
+partial_least_squares
+```
+
+The method that maximizes the RMSE is the gradient assisted tree mode. 
+
+##Part 3: Binary Classification Option A
+
+
+```{r, lm_models_02, eval=TRUE}
+metric_2 = "ROC"
+```
+
+
+```{r, glm_models_02, eval=TRUE}
+glm_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "glm",
+                        preProcess = c("center","scale"),
+                        metric = metric_2,
+                        trControl = my_ctrl_2)
+glm_mod_step_2
+```
+
+
+```{r, glmnet_models_2, eval=TRUE}
+glmnet_mod_step_2 <- train(outcome_2 ~ . + .*. + .*.*., data = step_2_b_df,
+                        method = "glmnet",
+                        preProcess = c("center","scale"),
+                        metric = metric_2,
+                        trControl = my_ctrl_2)
+glmnet_mod_step_2
+```
+
+```{r, neural_network_2, eval=TRUE}
+nnet_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "nnet",
+                        metric = metric_2,
+                        hidden = 8,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        trace = FALSE)
+
+nnet_mod_step_2
+```
+
+```{r, forest_2, eval=TRUE}
+forest_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "rf",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+
+forest_mod_step_2
+```
+
+```{r, gradient_boosted_tree_02, include = FALSE, eval=TRUE}
+grad_tree_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "xgbTree",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+```
+
+```{r, gradient_boosted_tree_2, eval = FALSE}
+grad_tree_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "xgbTree",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+```
+
+```{r,special_block_2, eval=TRUE}
+grad_tree_mod_step_2
+```
+
+```{r, k_nearest_neighbors_2, eval=TRUE}
+knn_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "knn",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2)
+
+knn_mod_step_2
+```
+
+```{r, partial_least_squares_2, eval=TRUE}
+partial_least_squares_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "pls",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2)
+
+partial_least_squares_2
+```
+
+The Random Forest model seems to be best for maximizing the ROC curve and maximizing Accuracy. 
+
+#Part 4: Binary Classification Option B
+
+```{r, glm_models_03, eval=TRUE}
+glm_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "glm",
+                        preProcess = c("center","scale"),
+                        metric = metric_2,
+                        trControl = my_ctrl_2)
+glm_mod_step_3
+```
+
+
+```{r, glmnet_models_3, eval=TRUE}
+glmnet_mod_step_3 <- train(outcome_2 ~ . + .*. + .*.*., data = step_2_a_df,
+                        method = "glmnet",
+                        preProcess = c("center","scale"),
+                        metric = metric_2,
+                        trControl = my_ctrl_2)
+glmnet_mod_step_3
+```
+
+```{r, neural_network_3, eval=TRUE}
+nnet_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "nnet",
+                        metric = metric_2,
+                        hidden = 8,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        trace = FALSE)
+
+nnet_mod_step_3
+```
+
+```{r, forest_3, eval=TRUE}
+forest_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "rf",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+
+forest_mod_step_3
+```
+
+```{r, gradient_boosted_tree_03, include = FALSE, eval=TRUE}
+grad_tree_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "xgbTree",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+```
+
+```{r, gradient_boosted_tree_3, eval = FALSE}
+grad_tree_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "xgbTree",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+```
+
+```{r,special_block_3, eval=TRUE}
+grad_tree_mod_step_3
+```
+
+```{r, k_nearest_neighbors_3, eval=TRUE}
+knn_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "knn",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2)
+
+knn_mod_step_3
+```
+
+```{r, partial_least_squares_3, eval=TRUE}
+partial_least_squares_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "pls",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2)
+
+partial_least_squares_3
+```
+
+The Random Forest model seems to be best for maximizing the ROC curve and maximizing Accuracy. 
+
+#Part 5: Analysis
+
+```{r, roc_compare, eval=TRUE}
+models_roc_compare <- resamples(list(GLM = glm_mod_step_2,
+                                    GLMNET = glmnet_mod_step_2,
+                                    NNET = nnet_mod_step_2,
+                                    RF = forest_mod_step_2,
+                                    XGB = grad_tree_mod_step_2,
+                                    KNN = knn_mod_step_2,
+                                    PLS = partial_least_squares_2))
+
+dotplot(models_roc_compare)
+```
+
+```{r, make_list, eval=TRUE}
+models_roc_compare <- resamples(list(GLM = glm_mod_step_3,
+                                    GLMNET = glmnet_mod_step_3,
+                                    NNET = nnet_mod_step_3,
+                                    RF = forest_mod_step_3,
+                                    XGB = grad_tree_mod_step_3,
+                                    KNN = knn_mod_step_3,
+                                    PLS = partial_least_squares_3))
+
+dotplot(models_roc_compare)
+```
+
+
+As displayed above, the random forest model is the model that tends to classify the most failures correctly. This seems to happen regardless of whether or not we make predictions with response_01 or with the 11 original inputs. In regards to whether or not it is better to predict using all of the inputs or predict using response_1, it does seem that predicting using response_1 does give us a significant boost in accuracy in the neural network case, which is relevant because the neural network appears to be the second best model. The second best model appears to be the neural network, as it has about the same ROC curve as XGB in the instance where we are predicting with response_1, and it has higher sensitivity in this case as well (which is important because we are in the business of predicting failures).  
+
+
+
+```{r, extract_holdout_preds, eval=TRUE}
+model_pred_results <- forest_mod_step_2$pred %>% tibble::as_tibble() %>% 
+  filter(mtry == forest_mod_step_2$bestTune$mtry) %>% 
+  select(pred, obs, Pass, Fail, rowIndex, Resample) %>% 
+  mutate(model_name = "RF") %>% 
+  bind_rows(nnet_mod_step_2$pred %>% tibble::as_tibble() %>% 
+              filter(size == nnet_mod_step_2$bestTune$size,
+                     decay == nnet_mod_step_2$bestTune$decay) %>% 
+              select(pred, obs, Pass, Fail, rowIndex, Resample) %>% 
+              mutate(model_name = "NNET"))
+```
+
+```{r, extract_holdout_preds_2, eval=TRUE}
+model_pred_results_2 <- forest_mod_step_3$pred %>% tibble::as_tibble() %>% 
+  filter(mtry == forest_mod_step_3$bestTune$mtry) %>% 
+  select(pred, obs, Pass, Fail, rowIndex, Resample) %>% 
+  mutate(model_name = "RF") %>% 
+  bind_rows(nnet_mod_step_3$pred %>% tibble::as_tibble() %>% 
+              filter(size == nnet_mod_step_3$bestTune$size,
+                     decay == nnet_mod_step_3$bestTune$decay) %>% 
+              select(pred, obs, Pass, Fail, rowIndex, Resample) %>% 
+              mutate(model_name = "NNET"))
+```
+
+```{r, best_model_visual, eval=TRUE}
+model_pred_results %>% 
+  ggplot(aes(m = Fail,d = ifelse(obs=="Fail", 1, 0), color = model_name)) +
+  geom_roc(cutoffs.at = 0.5) +
+  coord_equal() +
+  style_roc()
+```
+
+```{r, best_model_visual_2, eval=TRUE}
+model_pred_results_2 %>% 
+  ggplot(aes(m = Fail,d = ifelse(obs=="Fail", 1, 0), color = model_name)) +
+  geom_roc(cutoffs.at = 0.5) +
+  coord_equal() +
+  style_roc()
+```
+
+The ROC curves above tell us a couple things. The most obvious, is that our model is much better than chance at predicting failures. If we were predicting passing and failing in a vacuum, we would only predict correctly about 51% of the time. However, our model makes the correct prediction nearly 80% of the time! The neural network lags behind the random forest in the case where we do not use response_1, however when we do use response_1 the ROC curves of both models are nearly identical. 
+
+
+```{r, best_model_visual_3, eval=TRUE}
+plot(varImp(forest_mod_step_2))
+plot(varImp(nnet_mod_step_2))
+
+plot(varImp(forest_mod_step_3))
+plot(varImp(nnet_mod_step_3))
+```
+
+Continuing the analysis with individual inputs, it appears that both models agree in general about which inputs are important in the response_1 case, but have a surprising amount of disagreement when given all the inputs. I have a hunch that the random forest model is correctly classifying that x07 and x08 are important in determining the outcome, and the the neural network's emphasis on x01 when given many inputs is simply the neural network putting too much emphasis on x01 over x08 (which would explain why its ROC curve has a lower amount of error when predicting from all of the inputs). Based on our models predictions and our visualization of x07, x01, and xB, it appears that the most important decisions for minimizing failure are:
+
+- Setting x07 somewhere between 143 and 145
+- Setting x08 somewhere between 78 and 80 
+- Buying materials from B2 and avoiding B3 and B4 (unless B3 and B4 are cheaper options and the increased cost of failure is worth it)
+- Setting x01 somewhere between 116 and 119
+- Setting x03 somewhere between 155 and 160
+
+
+
+

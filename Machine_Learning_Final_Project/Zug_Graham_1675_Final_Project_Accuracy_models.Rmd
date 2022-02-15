@@ -1,0 +1,261 @@
+---
+title: "CS 1675 Final Project"
+subtitle: "Example: save and reload a model object"
+author: "Graham Zug"
+output: html_document
+---
+
+```{r setup, include=FALSE, eval=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Part 0: Setting The Workspace Up
+
+This part is just loading in packages and data, as well as splitting the data up logically (e.g. dividing the response 1 from the response 2 inputs).
+
+
+
+Separate the variables associated with the Option B classification formulation. Notice that the `outcome_2` variable is converted to a factor with a specific ordering of the levels. Use this ordering when modeling in `caret` to make sure everyone predicts the `Fail` class as the "positive" class in the confusion matrix.  
+
+```{r, make_step_2_option_b_data, eval=TRUE}
+step_2_b_df <- df %>% select(xA, xB, response_1, x07:x11, outcome_2) %>% 
+  mutate(outcome_2 = factor(outcome_2, levels = c("Fail", "Pass")))
+```
+
+Separate the variables associated with the Option A classification formulation. The `outcome_2` variable is again converted to a factor with a specific ordering of the levels.  
+
+```{r, make_step_2_option_a_data, eval=TRUE}
+step_2_a_df <- df %>% select(xA, xB, x01:x11, outcome_2) %>% 
+  mutate(outcome_2 = factor(outcome_2, levels = c("Fail", "Pass")))
+```
+
+
+## Load packages
+
+```{r, load_packages, eval=TRUE}
+library(caret)
+library(tidyverse)
+library(rstanarm)
+library(dotwhisker)
+library(broom.mixed)
+library(dplyr)
+library(ggplot2)
+library(e1071)
+library(neuralnet)
+library(plotROC)
+```
+
+
+
+```{r, controls, eval=TRUE}
+
+my_ctrl_2 <- trainControl(method = "repeatedcv", 
+                             number = 5,
+                             repeats = 10,
+                             summaryFunction = twoClassSummary,                          
+                             classProbs = TRUE,
+                             savePredictions = TRUE)
+```
+
+
+
+
+##Part 3: Binary Classification Option A (Accuracy)
+
+Time to fit some regression models to predict outcome2!
+
+```{r, lm_models_02, eval=TRUE}
+metric_2 = "AUC"
+```
+
+
+```{r, glm_models_02, eval=TRUE}
+glm_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "glm",
+                        preProcess = c("center","scale"),
+                        metric = metric_2,
+                        trControl = my_ctrl_2)
+glm_mod_step_2
+```
+
+
+```{r, glmnet_models_2, eval=TRUE}
+glmnet_mod_step_2 <- train(outcome_2 ~ . + .*. + .*.*., data = step_2_b_df,
+                        method = "glmnet",
+                        preProcess = c("center","scale"),
+                        metric = metric_2,
+                        trControl = my_ctrl_2)
+glmnet_mod_step_2
+```
+
+```{r, neural_network_2, eval=TRUE}
+nnet_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "nnet",
+                        metric = metric_2,
+                        hidden = 8,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        trace = FALSE)
+
+nnet_mod_step_2
+```
+
+```{r, forest_2, eval=TRUE}
+forest_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "rf",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+
+forest_mod_step_2
+```
+
+```{r, gradient_boosted_tree_02, include = FALSE, eval=TRUE}
+grad_tree_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "xgbTree",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+```
+
+```{r, gradient_boosted_tree_2, eval = FALSE}
+grad_tree_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "xgbTree",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+```
+
+```{r,special_block_2, eval=TRUE}
+grad_tree_mod_step_2
+```
+
+```{r, k_nearest_neighbors_2, eval=TRUE}
+knn_mod_step_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "knn",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2)
+
+knn_mod_step_2
+```
+
+```{r, partial_least_squares_2, eval=TRUE}
+partial_least_squares_2 <- train(outcome_2 ~ ., 
+                        data = step_2_b_df,
+                        method = "pls",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2)
+
+partial_least_squares_2
+```
+
+
+#Part 4: Binary Classification Option B (Accuracy)
+
+```{r, glm_models_03, eval=TRUE}
+glm_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "glm",
+                        preProcess = c("center","scale"),
+                        metric = metric_2,
+                        trControl = my_ctrl_2)
+glm_mod_step_3
+```
+
+
+```{r, glmnet_models_3, eval=TRUE}
+glmnet_mod_step_3 <- train(outcome_2 ~ . + .*. + .*.*., data = step_2_a_df,
+                        method = "glmnet",
+                        preProcess = c("center","scale"),
+                        metric = metric_2,
+                        trControl = my_ctrl_2)
+glmnet_mod_step_3
+```
+
+```{r, neural_network_3, eval=TRUE}
+nnet_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "nnet",
+                        metric = metric_2,
+                        hidden = 8,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        trace = FALSE)
+
+nnet_mod_step_3
+```
+
+```{r, forest_3, eval=TRUE}
+forest_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "rf",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+
+forest_mod_step_3
+```
+
+```{r, gradient_boosted_tree_03, include = FALSE, eval=TRUE}
+grad_tree_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "xgbTree",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+```
+
+```{r, gradient_boosted_tree_3, eval = FALSE}
+grad_tree_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "xgbTree",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2,
+                        importance = TRUE)
+```
+
+```{r,special_block_3, eval=TRUE}
+grad_tree_mod_step_3
+```
+
+```{r, k_nearest_neighbors_3, eval=TRUE}
+knn_mod_step_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "knn",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2)
+
+knn_mod_step_3
+```
+
+```{r, partial_least_squares_3, eval=TRUE}
+partial_least_squares_3 <- train(outcome_2 ~ ., 
+                        data = step_2_a_df,
+                        method = "pls",
+                        metric = metric_2,
+                        preProcess = c("center","scale"),
+                        trControl = my_ctrl_2)
+
+partial_least_squares_3
+```
+
+
+
+
+
+

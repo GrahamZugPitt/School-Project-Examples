@@ -1,0 +1,55 @@
+Justification of My Approach:
+
+I used the textbook's indexible min priority queue backed by closed hashing
+to finish this project. I used the textbook's indexible min priority queue primarily
+because it is fast. It looks up the minimum priority value in constant time because
+it is backed by a heap (which can complete multiple operations in this program), you can look up anything
+in the heap in O(log(N)) so long as the data structure backing your heap is
+O(log(N)) or less, and you can insert in O(log(N)) time. The cool thing about
+this is that so long as your heap is backed by a data structure that can look things
+up in log(N) time or better, every operation will be O(log(N)) or better.
+This leads me to the data structure I chose to back the heap with, 
+a closed hash map. I made the hash map myself and used it both for
+indirection in my heap and for storing a series of multiple heaps. 
+The hash map has an amortized time of O(1). I felt that a hash map was the 
+most efficient choice because even though it technically has
+a worst case run time of O(n) for looking things up, the vast majority of the
+time it will find what it is looking for instantly. My hash function worked by
+taking the first five digits of the VIN number of any given car, and using
+horner's method on them (I didn't use the whole number because I did not
+want the int value resulting from this to overflow). The array that stored the 
+hash table had 997 slots, which meant that assuming my hash function evenly
+distributed the cars, there would be a very small amount of colisions for any
+reasonable number of cars that an individual would be comparing. All of this
+means that I have:
+
+O(log(N)) for adding a car
+O(log(N)) for removing an arbitrary car (or effectively this with amortized analysis)
+O(1) for peeking at the top of the heap
+
+This, of course, is only true assuming we do not need to find the heap! However, the next part 
+of this problem is dealing with an arbitrary number of heaps. In the case of the heaps
+containing all of the cars, this isn't a problem because the number of heaps is constant (2).
+But when you need to look up a specific make and model of a car it becomes a problem, because
+the best way to achieve the run times above for finding the lowest price or mileage car for
+individual makes and models of cars is by doing the same thing as above, but creating individual
+heaps for each make and model combination. The O(log(N)) becomes a dastardly O(n) if you simply iterate over your
+heaps to find the heap you're looking for (because that can only happen in O(n)). So instead of iterating I broke
+out the closed hash function again but this time instead of backing the heap, I created a hash table full of heaps.
+This hash table allowed me to look up an arbitary heap in what was effectively constant time (for the same reasons stated
+above). I had two arrays of heaps, one for mileage and one for price. Both used the same hash function, which took the first
+two letters of the make and the first three letters of the model, combined them into a single string, and used horner's method
+on them. This meant I could look up my heaps in what was effectively constant time, which meant that I could achieve equivolent run times
+to the run times above for every individual heap, which meant every operation performed by my program is O(log(n))! 
+
+Spacially, my reasoning was this: a java int is 4 bytes and a java String is ~ 2 * length bytes. Assuming that the vin number is always 16 characters
+long, the make, model, and color are all 10 characters long (I feel this is estimating "against myself," as most colors, makes, and models will be less
+than 10 characters long) than each car is about 32 + 20 + 20 + 4 + 4 + 20 = 100 bytes in size. Each data structure is technically resizeable, but 
+all of the hash tables are initialized at about 1,000. I store each car four times so if I had 1,000 cars in my data structure I would be consuming
+1000 * 100 * 4 = 400000 bytes or ~ 4/10 of a megabyte of memory. Considering that most computers have gigabytes of memory, and I would assume most users of this
+application would be comparing far less than 1,000 cars, the program doesn't seem to be wasting that much space relative to what is avalible. The program consumes O(n)
+space where n is the number of cars, O(n) in the number of cars inherently can't be beaten because you must store each car somewhere, and I do not feel that my program is particularly wasteful
+considering this, and considering that it can do everything it does in log(n) time at the cost of storing each car multiple times. I also feel that I used my hash table efficiently
+when it comes to deleting and updating items, every car has the same ID in a single hash table for all four heaps it is stored in (each car will be stored in the price heap,
+the mileage heap, the price heap for it's make and model, and the mileage heap for it's make and model, and will always have the same ID in all four heaps, which meant I
+only needed to use one hash table). 
